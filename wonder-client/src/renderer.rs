@@ -1,6 +1,7 @@
 use crate::bitmap::*;
 use crate::util::{ClientMsg, MainMsg, RenderMsg};
-use crate::worldgen::{Chunk, Coords, Faction, CHUNK_SIZE, TILE_SIZE};
+use crate::worldgen::{Entity,Chunk, Coords, Faction, CHUNK_SIZE, TILE_SIZE};
+use std::collections::HashSet;
 use lazy_static::lazy_static;
 use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::Keycode;
@@ -77,6 +78,7 @@ pub fn render_server(
         let now = Instant::now();
         let delta_time = now.duration_since(last_frame_time);
         let delta_seconds = delta_time.as_secs_f32();
+	let mut player: Option<Entity> = None;
         last_frame_time = now;
         camera.tick();
         if let Ok(rec) = rx.try_recv() {
@@ -98,102 +100,60 @@ pub fn render_server(
                     {
                         continue;
                     }
+                    let mut pressed_keys = HashSet::new();
+
                     for event in event_pump.poll_iter() {
                         match event {
                             Event::Quit { .. }
                             | Event::KeyDown {
                                 keycode: Some(Keycode::Escape),
                                 ..
-                            } => {
-                                break 'main;
-                            }
+                            } => break 'main,
+
                             Event::KeyDown {
                                 keycode: Some(Keycode::Plus),
                                 ..
-                            } => {
-                                camera.zoom += 1;
-                            }
+                            } => camera.zoom += 1,
 
                             Event::KeyDown {
                                 keycode: Some(Keycode::Minus),
                                 ..
-                            } => {
-                                camera.zoom -= 1;
-                            }
+                            } => camera.zoom -= 1,
+
                             Event::KeyDown {
-                                keycode: Some(Keycode::Left),
-                                ..
+                                keycode: Some(key), ..
                             } => {
-                                camera.coords.x += *CAMERA_STEP;
+                                match key {
+                                    Keycode::Left => camera.coords.x += *CAMERA_STEP,
+                                    Keycode::Right => camera.coords.x -= *CAMERA_STEP,
+                                    Keycode::Up => camera.coords.y += *CAMERA_STEP,
+                                    Keycode::Down => camera.coords.y -= *CAMERA_STEP,
+                                    Keycode::W | Keycode::A | Keycode::S | Keycode::D => {
+                                        pressed_keys.insert(key);
+                                    }
+                                    Keycode::F => factions = !factions,
+                                    Keycode::N => {
+                                        news = !news;
+                                        canvas.set_draw_color(Color::RGB(0, 0, 0));
+                                        canvas.clear();
+                                    }
+                                    _ => {}
+                                }
                                 trigger_refresh = true;
                             }
-                            Event::KeyDown {
-                                keycode: Some(Keycode::Right),
-                                ..
+
+                            Event::KeyUp {
+                                keycode: Some(key), ..
                             } => {
-                                camera.coords.x -= *CAMERA_STEP;
-                                trigger_refresh = true;
+                                if matches!(key, Keycode::W | Keycode::A | Keycode::S | Keycode::D)
+                                {
+                                    pressed_keys.remove(&key);
+                                }
+                                if pressed_keys.is_empty() {
+                                    input_buffer.forward = false;
+                                }
                             }
-                            Event::KeyDown {
-                                keycode: Some(Keycode::Up),
-                                ..
-                            } => {
-                                camera.coords.y += *CAMERA_STEP;
-                                trigger_refresh = true;
-                            }
-                            Event::KeyDown {
-                                keycode: Some(Keycode::Down),
-                                ..
-                            } => {
-                                camera.coords.y -= *CAMERA_STEP;
-                                trigger_refresh = true;
-                            }
-                            Event::KeyDown {
-                                keycode: Some(Keycode::W),
-                                ..
-                            } => {
-                                input_buffer.ang = 0.0;
-                                input_buffer.forward = true;
-                                trigger_refresh = true;
-                            }
-                            Event::KeyDown {
-                                keycode: Some(Keycode::A),
-                                ..
-                            } => {
-                                input_buffer.ang = -3.14 / 2.0;
-                                input_buffer.forward = true;
-                                trigger_refresh = true;
-                            }
-                            Event::KeyDown {
-                                keycode: Some(Keycode::S),
-                                ..
-                            } => {
-                                input_buffer.ang = 3.14;
-                                input_buffer.forward = true;
-                                trigger_refresh = true;
-                            }
-                            Event::KeyDown {
-                                keycode: Some(Keycode::D),
-                                ..
-                            } => {
-                                input_buffer.ang = 3.14 / 2.0;
-                                input_buffer.forward = true;
-                                trigger_refresh = true;
-                            }
-                            Event::KeyDown {
-                                keycode: Some(Keycode::F),
-                                ..
-                            } => {
-                                factions = !factions;
-                            }
-                            Event::KeyDown {
-                                keycode: Some(Keycode::N),
-                                ..
-                            } => {
-                                news = !news;
-                                canvas.set_draw_color(Color::RGB(0, 0, 0));
-                                canvas.clear();
-                            }
+
                             Event::Window { win_event, .. } => match win_event {
                                 WindowEvent::Resized(width, height) => {
                                     canvas
@@ -209,6 +169,27 @@ pub fn render_server(
 
                             _ => {}
                         }
+                    }
+
+                    // Handle WASD input for movement direction and angle
+                    if !pressed_keys.is_empty() {
+                        input_buffer.forward = true;
+                        input_buffer.ang = match (
+                            pressed_keys.contains(&Keycode::W),
+                            pressed_keys.contains(&Keycode::A),
+                            pressed_keys.contains(&Keycode::S),
+                            pressed_keys.contains(&Keycode::D),
+                        ) {
+                            (true, false, false, false) => 0.0,              // W
+                            (false, true, false, false) => -3.14 / 2.0,      // A
+                            (false, false, true, false) => 3.14,             // S
+                            (false, false, false, true) => 3.14 / 2.0,       // D
+                            (true, true, false, false) => -3.14 / 4.0,       // WA
+                            (true, false, false, true) => 3.14 / 4.0,        // WD
+                            (false, true, true, false) => -3.14 * 3.0 / 4.0, // AS
+                            (false, false, true, true) => 3.14 * 3.0 / 4.0,  // SD
+                            _ => input_buffer.ang, // No change for invalid states
+                        };
                     }
                     if trigger_refresh {
                         canvas.set_draw_color(Color::RGB(0, 0, 0));
@@ -279,24 +260,9 @@ pub fn render_server(
                             *TILE_SIZE * camera.zoom as u32,
                         ));
                     }
-                    for m in &chunk.entities {
-                        let mut color = ((0) as u8, 255 as u8, 0);
-                        color.0 = 255;
-                        color.1 = 0;
-                        color.2 = 0;
-                        canvas.set_draw_color(Color::RGB(color.0, color.1, color.2));
-                        let _ = canvas.fill_rect(Rect::new(
-                            m.coords.x as i32 * *TILE_SIZE as i32 * camera.zoom
-                                + camera.coords.x as i32,
-                            m.coords.y as i32 * *TILE_SIZE as i32 * camera.zoom
-                                + camera.coords.y as i32,
-                            *TILE_SIZE * camera.zoom as u32,
-                            *TILE_SIZE * camera.zoom as u32,
-                        ));
-                    }
                     if let Ok(rm) = rx_client.recv() {
-                        let mut m = rm.player;
-                        println!("player: {}", m.coords.x);
+                        let mut m = rm.player.clone();
+			player = Some(m.clone());
                         let mut color = ((0) as u8, 255 as u8, 0);
                         color.0 = 255;
                         color.1 = 0;
@@ -311,11 +277,33 @@ pub fn render_server(
                             *TILE_SIZE * camera.zoom as u32,
                         ));
                         m.ang = input_buffer.ang;
-                        m.vel.0 = input_buffer.ang.sin() * 1.0;
-                        m.vel.1 = -input_buffer.ang.cos() * 1.0;
-                        m.coords.x += m.vel.0 * delta_seconds;
-                        m.coords.y += m.vel.1 * delta_seconds;
+                        if input_buffer.forward {
+                            m.vel.0 = input_buffer.ang.sin() * 1.0;
+                            m.vel.1 = -input_buffer.ang.cos() * 1.0;
+                            m.coords.x += m.vel.0 * delta_seconds;
+                            m.coords.y += m.vel.1 * delta_seconds;
+                        }
                         let _ = sx_client.send(ClientMsg::from(m.clone()));
+                    }
+                    for m in &chunk.entities {
+			if let Some(ref player) = player {
+			    if m.index == player.index {
+				continue;
+			    }
+			}
+                        let mut color = ((0) as u8, 255 as u8, 0);
+                        color.0 = 255;
+                        color.1 = 0;
+                        color.2 = 0;
+                        canvas.set_draw_color(Color::RGB(color.0, color.1, color.2));
+                        let _ = canvas.fill_rect(Rect::new(
+                            m.coords.x as i32 * *TILE_SIZE as i32 * camera.zoom
+                                + camera.coords.x as i32,
+                            m.coords.y as i32 * *TILE_SIZE as i32 * camera.zoom
+                                + camera.coords.y as i32,
+                            *TILE_SIZE * camera.zoom as u32,
+                            *TILE_SIZE * camera.zoom as u32,
+                        ));
                     }
                     if factions {
                         let counts: HashMap<Faction, usize> = chunk.entities.clone().iter().fold(
@@ -365,7 +353,7 @@ pub fn render_server(
                     }
                 }
             }
-	    None => {}
+            None => {}
         }
         canvas.present();
         let _ = sx.send(MainMsg::from(camera.clone(), true));
